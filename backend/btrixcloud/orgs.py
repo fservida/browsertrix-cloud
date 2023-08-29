@@ -8,7 +8,7 @@ import urllib.parse
 from uuid import UUID, uuid4
 from datetime import datetime
 
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Dict
 
 from pymongo import ReturnDocument
 from pymongo.errors import AutoReconnect, DuplicateKeyError
@@ -34,14 +34,23 @@ from .models import (
     UserRole,
     User,
     PaginatedResponse,
+    OrgImportIn,
+    Organization,
+    CrawlConfig,
+    Crawl,
+    UploadedCrawl,
+    ConfigRevision,
+    Profile,
+    Collection,
 )
 from .pagination import DEFAULT_PAGE_SIZE, paginated_format
 from .utils import slug_from_name
 
 if TYPE_CHECKING:
     from .invites import InviteOps
+    from .users import UserManager
 else:
-    InviteOps = object
+    InviteOps = UserManager = object
 
 
 DEFAULT_ORG = os.environ.get("DEFAULT_ORG", "My Organization")
@@ -58,8 +67,12 @@ class OrgOps:
     def __init__(self, mdb, invites):
         self.orgs = mdb["organizations"]
         self.crawls_db = mdb["crawls"]
+        self.crawl_configs_db = mdb["crawl_configs"]
+        self.configs_revs_db = mdb["configs_revs"]
         self.profiles_db = mdb["profiles"]
         self.colls_db = mdb["collections"]
+        self.users_db = mdb["users"]
+        self.version_db = mdb["version"]
 
         self.router = None
         self.org_viewer_dep = None
@@ -509,6 +522,97 @@ class OrgOps:
             slug_id_map[org["_id"]] = org["slug"]
         return slug_id_map
 
+    async def export_org(
+        self, org: Organization, user: User, user_manager: UserManager
+    ) -> Dict[str, object]:
+        """Export all data related to org as JSON."""
+        org_serialized = await org.serialize_for_user(user, user_manager)
+
+        cursor = self.crawl_configs_db.find({"oid": org.id})
+        workflows = await cursor.to_list(length=100_000)
+
+        workflow_ids = [workflow["_id"] for workflow in workflows]
+
+        cursor = self.configs_revs_db.find({"cid": {"$in": workflow_ids}})
+        workflow_revs = await cursor.to_list(length=100_000)
+
+        cursor = self.crawls_db.find({"oid": org.id})
+        items = await cursor.to_list(length=100_000)
+
+        cursor = self.profiles_db.find({"oid": org.id})
+        profiles = await cursor.to_list(length=100_000)
+
+        cursor = self.colls_db.find({"oid": org.id})
+        collections = await cursor.to_list(length=100_000)
+
+        version = await self.version_db.find_one()
+
+        return {
+            "org": org_serialized.to_dict(),
+            "workflows": workflows,
+            "workflowRevisions": workflow_revs,
+            "archivedItems": items,
+            "profiles": profiles,
+            "collections": collections,
+            "dbVersion": version.get("version"),
+        }
+
+    async def import_org(self, org: OrgImportIn) -> Dict[str, bool]:
+        """Import org from exported org JSON"""
+        oid = UUID(org.org["_id"])
+
+        if await self.get_org_by_id(oid):
+            print(f"Org to import already exists, quitting", flush=True)
+            return {"imported": False}
+
+        version_res = await self.version_db.find_one()
+        version = version_res["version"]
+        if version != org.dbVersion:
+            print(
+                f"Export db version {org.dbVersion} doesn't match current db version {version}, quitting",
+                flush=True,
+            )
+            return {"imported": False}
+
+        org_users = {}
+        for key, value in org.org["users"].items():
+            org_users[key] = value["role"]
+        org.org["users"] = org_users
+
+        await self.orgs.insert_one(Organization.from_dict(org.org).to_dict())
+
+        for workflow in org.workflows:
+            await self.crawl_configs_db.insert_one(
+                CrawlConfig.from_dict(workflow).to_dict()
+            )
+
+        for rev in org.workflowRevisions:
+            await self.configs_revs_db.insert_one(
+                ConfigRevision.from_dict(rev).to_dict()
+            )
+
+        for item in org.archivedItems:
+            item_id = item.get("_id")
+
+            item_instance = None
+            if item["type"] == "crawl":
+                item_instance = Crawl.from_dict(item)
+            if item["type"] == "upload":
+                item_instance = UploadedCrawl.from_dict(item)
+            if not item_instance:
+                print(f"Archived item {item_id} has no type, skipping", flush=True)
+                continue
+
+            await self.crawls_db.insert_one(item_instance.to_dict())
+
+        for profile in org.profiles:
+            await self.profiles_db.insert_one(Profile.from_dict(profile).to_dict())
+
+        for collection in org.collections:
+            await self.colls_db.insert_one(Collection.from_dict(collection).to_dict())
+
+        return {"imported": True}
+
 
 # ============================================================================
 # pylint: disable=too-many-statements
@@ -783,5 +887,25 @@ def init_orgs_api(app, mdb, user_manager, invites, user_dep):
         if not user.is_superuser:
             raise HTTPException(status_code=403, detail="Not Allowed")
         return await ops.get_all_org_slugs_with_ids()
+
+    @router.get("/export", tags=["organizations"])
+    async def export_org(
+        org: Organization = Depends(org_owner_dep),
+        user: User = Depends(user_dep),
+    ):
+        if not user.is_superuser:
+            raise HTTPException(status_code=403, detail="Not Allowed")
+
+        return await ops.export_org(org, user, user_manager)
+
+    @app.post("/orgs/import", tags=["organizations"])
+    async def import_org(
+        org: OrgImportIn,
+        user: User = Depends(user_dep),
+    ):
+        if not user.is_superuser:
+            raise HTTPException(status_code=403, detail="Not Allowed")
+
+        return await ops.import_org(org)
 
     return ops

@@ -910,7 +910,12 @@ class Organization(BaseMongoModel):
     async def serialize_for_user(self, user: User, user_manager) -> OrgOut:
         """Serialize result based on current user access"""
 
-        exclude = {"storage"}
+        exclude = set()
+
+        if not user.is_superuser:
+            exclude.add("storage")
+            exclude.add("storageReplicas")
+            exclude.add("customStorages")
 
         if not self.is_owner(user):
             exclude.add("users")
@@ -1210,3 +1215,21 @@ class WebhookNotification(BaseMongoModel):
     attempts: int = 0
     created: datetime
     lastAttempted: Optional[datetime] = None
+
+
+# ============================================================================
+
+### ORG IMPORT ###
+
+
+# ============================================================================
+class OrgImportIn(BaseModel):
+    """Model for importing an org from an org export"""
+
+    org: Dict[str, object]
+    workflows: List[Dict[str, object]]
+    workflowRevisions: List[Dict[str, object]]
+    archivedItems: List[Dict[str, object]]
+    profiles: List[Dict[str, object]]
+    collections: List[Dict[str, object]]
+    dbVersion: str
