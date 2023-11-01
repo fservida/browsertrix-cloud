@@ -563,7 +563,7 @@ class OrgOps:
 
         if await self.get_org_by_id(oid):
             print(f"Org to import already exists, quitting", flush=True)
-            return {"imported": False}
+            raise HTTPException(status_code=400, detail="org_already_exists")
 
         version_res = await self.version_db.find_one()
         version = version_res["version"]
@@ -572,7 +572,7 @@ class OrgOps:
                 f"Export db version {org.dbVersion} doesn't match current db version {version}, quitting",
                 flush=True,
             )
-            return {"imported": False}
+            raise HTTPException(status_code=400, detail="db_version_mismatch")
 
         org_users = {}
         for key, value in org.org["users"].items():
