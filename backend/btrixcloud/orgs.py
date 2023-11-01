@@ -35,7 +35,6 @@ from .models import (
     User,
     PaginatedResponse,
     OrgImportIn,
-    Organization,
     CrawlConfig,
     Crawl,
     UploadedCrawl,
@@ -57,7 +56,7 @@ DEFAULT_ORG = os.environ.get("DEFAULT_ORG", "My Organization")
 
 
 # ============================================================================
-# pylint: disable=too-many-public-methods, too-many-instance-attributes
+# pylint: disable=too-many-public-methods, too-many-instance-attributes, too-many-locals
 class OrgOps:
     """Organization API operations"""
 
@@ -559,17 +558,17 @@ class OrgOps:
 
     async def import_org(self, org: OrgImportIn) -> Dict[str, bool]:
         """Import org from exported org JSON"""
-        oid = UUID(org.org["_id"])
+        oid = UUID(org.org.get("_id"))
 
         if await self.get_org_by_id(oid):
-            print(f"Org to import already exists, quitting", flush=True)
+            print(f"Org {oid} already exists, quitting", flush=True)
             raise HTTPException(status_code=400, detail="org_already_exists")
 
         version_res = await self.version_db.find_one()
         version = version_res["version"]
         if version != org.dbVersion:
             print(
-                f"Export db version {org.dbVersion} doesn't match current db version {version}, quitting",
+                f"Export db version: {org.dbVersion} doesn't match db: {version}, quitting",
                 flush=True,
             )
             raise HTTPException(status_code=400, detail="db_version_mismatch")
